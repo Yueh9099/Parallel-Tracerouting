@@ -2,7 +2,10 @@
 //
 
 #include "pch.h"
+#include "SocketUDP.h"
+#include "parserDNS.h"
 #pragma comment(lib,"ws2_32.lib")
+#pragma comment(lib, "IPHLPAPI.lib")
 #define IP_HDR_SIZE 20
 #define ICMP_HDR_SIZE 8
 #define MAX_SIZE 65200
@@ -14,6 +17,20 @@
 #define ICMP_DEST_UNREACH 3 
 #define ICMP_TTL_EXPIRED 11 
 #define ICMP_ECHO_REQUEST 8 
+
+#define ICMP 1
+
+#define MALLOC(x) HeapAlloc(GetProcessHeap(), 0, (x))
+#define FREE(x) HeapFree(GetProcessHeap(), 0, (x))
+
+class routerInfor {
+public:
+	int seq;
+	char* hostName;
+	DWORD ip;
+	double RTT;
+	bool recvIP;
+};
 
 /* remember the current packing state */
 #pragma pack (push) 
@@ -72,6 +89,53 @@ u_short ip_checksum(u_short* buffer, int size)
 	return (u_short)(~cksum);
 }
 
+//source:https://docs.microsoft.com/en-us/windows/win32/api/iphlpapi/nf-iphlpapi-getnetworkparams
+int getDNSServer(char* dnsServerIP, int size) {
+	FIXED_INFO* pFixedInfo;
+	ULONG ulOutBufLen;
+	DWORD dwRetVal;
+	IP_ADDR_STRING* pIPAddr;
+
+	pFixedInfo = (FIXED_INFO*)MALLOC(sizeof(FIXED_INFO));
+	if (pFixedInfo == NULL) {
+		printf("Error allocating memory needed to call GetNetworkParams\n");
+		return 0;
+	}
+	ulOutBufLen = sizeof(FIXED_INFO);
+// Make an initial call to GetAdaptersInfo to get
+// the necessary size into the ulOutBufLen variable
+	if (GetNetworkParams(pFixedInfo, &ulOutBufLen) == ERROR_BUFFER_OVERFLOW) {
+		FREE(pFixedInfo);
+		pFixedInfo = (FIXED_INFO*)MALLOC(ulOutBufLen);
+		if (pFixedInfo == NULL) {
+			printf("Error allocating memory needed to call GetNetworkParams\n");
+			return 0;
+		}
+	}
+	if (dwRetVal = GetNetworkParams(pFixedInfo, &ulOutBufLen) == NO_ERROR) {
+		
+		
+		
+		memcpy(dnsServerIP,pFixedInfo->DnsServerList.IpAddress.String,size);
+		if (pFixedInfo)
+			FREE(pFixedInfo);
+		
+		
+		return 1;
+		
+
+	}
+	else {
+		printf("GetNetworkParams failed with error: %d\n", dwRetVal);
+		return 0;
+	}
+
+	if (pFixedInfo)
+		FREE(pFixedInfo);
+
+	return 0;
+}
+
 
 int main(int argc, char** argv)
 {
@@ -81,6 +145,13 @@ int main(int argc, char** argv)
 	}
 	char* host = argv[1];
 	printf("host is %s\n",host);
+
+	//get local dns server
+	char localDNSServer[16];
+	if (getDNSServer(localDNSServer,16) == 0) {
+		printf("cannot get the local dns server IP\n");
+	}
+	//printf("local dns:%s\n",localDNSServer);
 	
 	// WAS initialization
 	WSADATA wsaData;
@@ -164,6 +235,7 @@ int main(int argc, char** argv)
 	int ret;
 	int recvBytes;
 	SOCKADDR remoteAddr;
+	int remoteLen = sizeof(SOCKADDR);
 
 	if ((ret = select(0, &readfds, NULL, NULL, &timeout))==SOCKET_ERROR) {
 		printf("select() failed with %d\n", WSAGetLastError());
@@ -176,7 +248,7 @@ int main(int argc, char** argv)
 	else
 	{
 		//printf("I can receive ICMP now!\n");
-		if ((recvBytes = recvfrom(sendSocket, (char*)recBuf, MAX_REPLY_SIZE, 0, &remoteAddr, 0)) == SOCKET_ERROR) {
+		if ((recvBytes = recvfrom(sendSocket, (char*)recBuf, MAX_REPLY_SIZE, 0, &remoteAddr, &remoteLen)) == SOCKET_ERROR) {
 			printf("recfrom() failed with %d\n",WSAGetLastError());
 			exit(-1);
 		}
@@ -187,7 +259,23 @@ int main(int argc, char** argv)
 		// then receive successfully
 	}
 
-	if(router_icmp_hdr->type )
+	//prepare the udp socket for dns
+	SocketUDP dnsSocket;
+	if (!dnsSocket.bindUDP()) {
+		printf("DNS Socket local bind error %d\n", WSAGetLastError());
+		WSACleanup();
+		return 0;
+	}
+	socketUDP.setRemoteSocket(localDNSServer, 53);
+
+	DWORD srcIP = 0;
+	if (router_icmp_hdr->type == ICMP_ECHO_REPLY && router_icmp_hdr->code == 0) {
+		if (origi_ip_hdr->proto == ICMP) {
+			if (origi_icmp_hdr->id == GetCurrentProcessId()) {
+				srcIP = router_ip_hdr->source_ip;
+			}
+		}
+	}
 
 
 	
