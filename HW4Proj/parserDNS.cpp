@@ -12,9 +12,10 @@ ParserDNS::ParserDNS(char* buf_in, int resBytes_in, char* sendPkt) {
 bool ParserDNS::checkPkt() {
     //check packet size bigger than DNS header
     if (recvBytes < sizeof(FixedDNSHeader)) {
-        printf("\t++ Invalid reply: packet smaller than fixed DNS Header\n");
+        //printf("\t++ Invalid reply: packet smaller than fixed DNS Header\n");
         return false;
     }
+    /*
     printf("\tTXID 0x%04x flags 0x%04x questions %d answers %d authority %d additional %d\n",
         htons(dhRes->ID),
         htons(dhRes->flags),
@@ -22,20 +23,21 @@ bool ParserDNS::checkPkt() {
         htons(dhRes->answers),
         htons(dhRes->authority),
         htons(dhRes->additional));
+    */
 
     // Check for valid ID
     if (dhRes->ID != dh->ID) {
-        printf("\t++ invalid reply: TXID mismatch, sent 0x%04x, received 0x%04x\n", htons(dh->ID), htons(dhRes->ID));
+        //printf("\t++ invalid reply: TXID mismatch, sent 0x%04x, received 0x%04x\n", htons(dh->ID), htons(dhRes->ID));
         return false;
     }
 
     // Check Rcode
     int Rcode = htons(dhRes->flags) & 0X000f;
     if ((Rcode) == 0) {
-        printf("\tsucceeded with Rcode = %d\n", Rcode);
+        //printf("\tsucceeded with Rcode = %d\n", Rcode);
     }
     else {
-        printf("\tfailed with Rcode = %d\n", Rcode);
+        //printf("\tfailed with Rcode = %d\n", Rcode);
         return false;
     }
 
@@ -51,20 +53,20 @@ bool ParserDNS::printQuestions() {
 
     resPacket = (char*)(dhRes + 1);
 
-    printf("\t------------ [questions] ----------\n");
+    //printf("\t------------ [questions] ----------\n");
     for (int i = 0; i < htons(dhRes->questions); i++) {
         if (resPacket - buf >= recvBytes) {
-            printf("\t++ Invalid section: not enough records\n");
+            //printf("\t++ Invalid section: not enough records\n");
             return false;
         }
         string domainName = decodeStrDNS(resPacket);
         if (domainName.empty()) {
             return false;
         }
-        printf("\t\t%s ", domainName.c_str());
+        //printf("\t\t%s ", domainName.c_str());
 
         QueryHeader* qhTemp = (QueryHeader*)resPacket;
-        printf("type %d class %d\n", htons(qhTemp->qType), htons(qhTemp->qClass));
+        //printf("type %d class %d\n", htons(qhTemp->qType), htons(qhTemp->qClass));
         resPacket += sizeof(QueryHeader);
     }
     return true;
@@ -78,23 +80,69 @@ bool ParserDNS::printAnswers() {
     return true;
 }
 
-
-
-bool ParserDNS::printAuthority() {
-    if (htons(dhRes->authority) > 0) {
-        printf("\t------------ [authority] ------------\n");
-        return printRR(htons(dhRes->authority));
+string ParserDNS::getHostName() {
+    if (!checkPkt()) {
+        return "";
     }
-    return true;
+    if (!printQuestions()) {
+        return "";
+    }
+    if (htons(dhRes->answers) > 0) {
+        //printf("\t------------ [answers] ------------\n");
+        return getRR(htons(dhRes->answers));
+    }
+    return "";
+}
+// get RR with DNS_PTR type 
+string ParserDNS::getRR(int number) {
+    for (int i = 0; i < number; i++) {
+        if (resPacket - buf >= recvBytes) {
+            //printf("\t++ Invalid section: not enough records\n");
+            return "";
+        }
+        if (resPacket + sizeof(DNSanswerHdr) - buf > recvBytes) {
+            //printf("\t++ Invalid record: truncated RR answer header\n");
+            return "";
+        }
+        string name = decodeStrDNS(resPacket);
+        if (name.empty()) {
+            return "";
+        }
+       //printf("\t\t%s ", name.c_str());
+        DNSanswerHdr* dah = (DNSanswerHdr*)resPacket;
+        resPacket += sizeof(DNSanswerHdr);
+        int qType = (int)htons(dah->qType);
+        if (qType == DNS_A) {
+            printf("A ");
+            if (resPacket + (int)htons(dah->len) - buf > recvBytes) {
+                //printf("\n\t++ Invalid record: RR value length stretches the answer beyond the packet\n");
+                return "";
+            }
+            resPacket += 4;
+        }
+        else if (qType == DNS_PTR || qType == DNS_NS || qType == DNS_CNAME) {
+            if (resPacket + (int)htons(dah->len) - buf > recvBytes) {
+                //printf("\n\t++ Invalid record: RR value length stretches the answer beyond the packet\n");
+                return "";
+            }
+            string name = decodeStrDNS(resPacket);
+            if (name.empty()) {
+                return "";
+            }
+            //printf("%s ", name.c_str());
+            if (qType == DNS_PTR) {
+                return name;
+            }
+            
+        }
+
+    }
+    return "";
 }
 
-bool ParserDNS::printAdditional() {
-    if (htons(dhRes->additional) > 0) {
-        printf("\t------------ [additional] ------------\n");
-        return printRR(htons(dhRes->additional));
-    }
-    return true;
-}
+
+
+
 
 bool ParserDNS::printRR(int number) {
     for (int i = 0; i < number; i++) {
@@ -122,24 +170,14 @@ bool ParserDNS::printRR(int number) {
                 return false;
             }
 
-            printf("%d.", 16 * (unsigned char(resPacket[0]) >> 4) + (unsigned char(resPacket[0]) & 0x0f));
-            printf("%d.", 16 * (unsigned char(resPacket[1]) >> 4) + (unsigned char(resPacket[1]) & 0x0f));
-            printf("%d.", 16 * (unsigned char(resPacket[2]) >> 4) + (unsigned char(resPacket[2]) & 0x0f));
-            printf("%d ", 16 * (unsigned char(resPacket[3]) >> 4) + (unsigned char(resPacket[3]) & 0x0f));
+            printf("%d.%d.%d.%d", resPacket[0], resPacket[1], resPacket[2], resPacket[3]);
+            
 
             printf(" TTL = %d\n", htonl(dah->TTL));
             resPacket += 4;
         }
         else if (qType == DNS_PTR || qType == DNS_NS || qType == DNS_CNAME) {
-            if (qType == DNS_PTR) {
-                printf("PTR ");
-            }
-            else if (qType == DNS_NS) {
-                printf("NS ");
-            }
-            else if (qType == DNS_CNAME) {
-                printf("CNAME ");
-            }
+            
 
             if (resPacket + (int)htons(dah->len) - buf > recvBytes) {
                 printf("\n\t++ Invalid record: RR value length stretches the answer beyond the packet\n");

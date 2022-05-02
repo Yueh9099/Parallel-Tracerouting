@@ -1,31 +1,7 @@
 #pragma once
 #include "pch.h"
 
-#pragma pack(push, 1)
-class QueryHeader {
-public:
-	USHORT qType;
-	USHORT qClass;
-};
 
-class FixedDNSHeader {
-public:
-	USHORT ID;
-	USHORT flags;
-	USHORT questions;
-	USHORT answers;
-	USHORT authority;
-	USHORT additional;
-};
-
-class DNSanswerHdr {
-public:
-	u_short qType;
-	u_short qClass;
-	u_int TTL;
-	u_short len;
-};
-#pragma pack(pop)
 using namespace std;
 class ParserDNS {
 public:
@@ -42,4 +18,6 @@ public:
 	bool printAdditional();
 	bool printRR(int number);
 	string decodeStrDNS(char* curPkt);
+	string getHostName();
+	string getRR(int number);
 };

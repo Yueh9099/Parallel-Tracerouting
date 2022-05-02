@@ -4,6 +4,7 @@
 #include "pch.h"
 #include "SocketUDP.h"
 #include "parserDNS.h"
+#include "QueryGenerator.h"
 #pragma comment(lib,"ws2_32.lib")
 #pragma comment(lib, "IPHLPAPI.lib")
 #define IP_HDR_SIZE 20
@@ -80,7 +81,7 @@ u_short ip_checksum(u_short* buffer, int size)
 	if (size) {
 		cksum += *(u_char*)buffer;
 	}
-	
+
 
 	/* add carry bits to lower u_short word */
 	cksum = (cksum >> 16) + (cksum & 0xffff);
@@ -102,8 +103,8 @@ int getDNSServer(char* dnsServerIP, int size) {
 		return 0;
 	}
 	ulOutBufLen = sizeof(FIXED_INFO);
-// Make an initial call to GetAdaptersInfo to get
-// the necessary size into the ulOutBufLen variable
+	// Make an initial call to GetAdaptersInfo to get
+	// the necessary size into the ulOutBufLen variable
 	if (GetNetworkParams(pFixedInfo, &ulOutBufLen) == ERROR_BUFFER_OVERFLOW) {
 		FREE(pFixedInfo);
 		pFixedInfo = (FIXED_INFO*)MALLOC(ulOutBufLen);
@@ -113,16 +114,16 @@ int getDNSServer(char* dnsServerIP, int size) {
 		}
 	}
 	if (dwRetVal = GetNetworkParams(pFixedInfo, &ulOutBufLen) == NO_ERROR) {
-		
-		
-		
-		memcpy(dnsServerIP,pFixedInfo->DnsServerList.IpAddress.String,size);
+
+
+
+		memcpy(dnsServerIP, pFixedInfo->DnsServerList.IpAddress.String, size);
 		if (pFixedInfo)
 			FREE(pFixedInfo);
-		
-		
+
+
 		return 1;
-		
+
 
 	}
 	else {
@@ -144,15 +145,15 @@ int main(int argc, char** argv)
 		exit(-1);
 	}
 	char* host = argv[1];
-	printf("host is %s\n",host);
+	printf("host is %s\n", host);
 
 	//get local dns server
 	char localDNSServer[16];
-	if (getDNSServer(localDNSServer,16) == 0) {
+	if (getDNSServer(localDNSServer, 16) == 0) {
 		printf("cannot get the local dns server IP\n");
 	}
-	//printf("local dns:%s\n",localDNSServer);
-	
+	printf("local dns:%s\n", localDNSServer);
+
 	// WAS initialization
 	WSADATA wsaData;
 	WORD wVersionRequested = MAKEWORD(2, 2);
@@ -166,7 +167,7 @@ int main(int argc, char** argv)
 	sockaddr_in pingAddr;
 	struct hostent* remote;
 	memset(&pingAddr, 0, sizeof(sockaddr_in));
-	
+
 	pingAddr.sin_family = AF_INET;
 
 	DWORD IP = inet_addr(host);
@@ -181,7 +182,7 @@ int main(int argc, char** argv)
 	else {
 		pingAddr.sin_addr.S_un.S_addr = IP;
 	}
-	
+
 
 	// socket setup
 	SOCKET sendSocket;
@@ -191,7 +192,7 @@ int main(int argc, char** argv)
 		WSACleanup();
 		exit(-1);
 	}
-	
+
 	//prepare sending buffer
 	u_char sendBuf[MAX_ICMP_SIZE];
 	ICMPHeader* icmp = (ICMPHeader*)sendBuf;
@@ -204,8 +205,8 @@ int main(int argc, char** argv)
 	int bufLen = ICMP_HDR_SIZE;
 	// send the ICMP pkt
 	int ttl = 20;
-	if (setsockopt(sendSocket, IPPROTO_IP,IP_TTL,(const char*) &ttl,sizeof(ttl)) == SOCKET_ERROR) {
-		printf("setsocketopt failed with %d\n",WSAGetLastError());
+	if (setsockopt(sendSocket, IPPROTO_IP, IP_TTL, (const char*)&ttl, sizeof(ttl)) == SOCKET_ERROR) {
+		printf("setsocketopt failed with %d\n", WSAGetLastError());
 		closesocket(sendSocket);
 		exit(-1);
 	}
@@ -221,10 +222,7 @@ int main(int argc, char** argv)
 
 	//receive and parse ICMP
 	u_char recBuf[MAX_REPLY_SIZE];
-	IPHeader* router_ip_hdr = (IPHeader*)recBuf;
-	ICMPHeader* router_icmp_hdr = (ICMPHeader*)(router_ip_hdr +1);
-	IPHeader* origi_ip_hdr = (IPHeader*)(router_icmp_hdr + 1);
-	ICMPHeader* origi_icmp_hdr = (ICMPHeader*)(origi_ip_hdr + 1);
+
 
 	fd_set readfds;
 	FD_ZERO(&readfds);
@@ -237,7 +235,7 @@ int main(int argc, char** argv)
 	SOCKADDR remoteAddr;
 	int remoteLen = sizeof(SOCKADDR);
 
-	if ((ret = select(0, &readfds, NULL, NULL, &timeout))==SOCKET_ERROR) {
+	if ((ret = select(0, &readfds, NULL, NULL, &timeout)) == SOCKET_ERROR) {
 		printf("select() failed with %d\n", WSAGetLastError());
 
 	}
@@ -249,7 +247,7 @@ int main(int argc, char** argv)
 	{
 		//printf("I can receive ICMP now!\n");
 		if ((recvBytes = recvfrom(sendSocket, (char*)recBuf, MAX_REPLY_SIZE, 0, &remoteAddr, &remoteLen)) == SOCKET_ERROR) {
-			printf("recfrom() failed with %d\n",WSAGetLastError());
+			printf("recfrom() failed with %d\n", WSAGetLastError());
 			exit(-1);
 		}
 		else if (recvBytes == 0) {
@@ -266,22 +264,58 @@ int main(int argc, char** argv)
 		WSACleanup();
 		return 0;
 	}
-	socketUDP.setRemoteSocket(localDNSServer, 53);
+	dnsSocket.setRemoteSocket(localDNSServer, 53);
 
-	DWORD srcIP = 0;
-	if (router_icmp_hdr->type == ICMP_ECHO_REPLY && router_icmp_hdr->code == 0) {
-		if (origi_ip_hdr->proto == ICMP) {
-			if (origi_icmp_hdr->id == GetCurrentProcessId()) {
-				srcIP = router_ip_hdr->source_ip;
+	//printf("ICMP type is %d:\n",router_icmp_hdr->type);
+
+	IPHeader* router_ip_hdr = (IPHeader*)recBuf;
+	int ipheaderLen = router_ip_hdr->h_len * 4;
+	ICMPHeader* router_icmp_hdr = (ICMPHeader*)(recBuf + ipheaderLen);
+
+	//IPHeader* origi_ip_hdr = (IPHeader*)(router_icmp_hdr + 1);
+	//ICMPHeader* origi_icmp_hdr = (ICMPHeader*)(origi_ip_hdr + 1);
+
+	char srcIP[16];
+	QueryGenerator queryG(srcIP, localDNSServer);
+	if (router_ip_hdr->proto == ICMP ) {
+		if (router_icmp_hdr->type == ICMP_ECHO_REPLY && router_icmp_hdr->code == 0) {
+			if (router_icmp_hdr->id == GetCurrentProcessId()) {
+				printf("receive icmp with type 0 code 0 (echo reply)\n");
+
+				struct sockaddr_in sa;
+				sa.sin_addr.S_un.S_addr = router_ip_hdr->source_ip;
+				inet_ntop(AF_INET, &(sa.sin_addr), srcIP, sizeof(srcIP));
+				printf("the host ip is: %s\n", srcIP);
+				// send the dns query pkt
+				
+				queryG.generatePacket(1);
+				if (!dnsSocket.sendUDP(queryG.packet, queryG.packetSize)) {
+					printf("Socket send error %d\n", WSAGetLastError());
+
+					WSACleanup();
+					return 0;
+				}
 			}
 		}
+
 	}
 
+	timeval timeout1;
+	timeout1.tv_sec = 10;
+	timeout1.tv_usec = 0;
+	char buf[MAX_DNS_LEN];
+	if (!dnsSocket.readUDP(buf, &timeout1)) {
+		WSACleanup();
+		printf("socket read fail\n");
+	}
+	ParserDNS parserDNS(buf, dnsSocket.resBytes, queryG.packet);
+	string routerName = parserDNS.getHostName();
+	printf("so the host name is %s\n",routerName.c_str());
 
-	
 
-	
-	
+
+
+
 
 
 }

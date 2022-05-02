@@ -155,11 +155,13 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="QueryGenerator.cpp" />
     <ClCompile Include="SocketUDP.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="parserDNS.h" />
     <ClInclude Include="pch.h" />
+    <ClInclude Include="QueryGenerator.h" />
     <ClInclude Include="SocketUDP.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

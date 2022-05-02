@@ -8,6 +8,7 @@
 #define PCH_H
 
 // add headers that you want to pre-compile here
+#define _CRT_SECURE_NO_WARNINGS
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <stdio.h>
 #include <winsock2.h>
@@ -44,5 +45,32 @@
 
 #define MAX_DNS_LEN 512
 #define MAX_DOMAIN_SEC_SIZE 64
+
+
+#pragma pack(push, 1)
+class QueryHeader {
+public:
+	USHORT qType;
+	USHORT qClass;
+};
+
+class FixedDNSHeader {
+public:
+	USHORT ID;
+	USHORT flags;
+	USHORT questions;
+	USHORT answers;
+	USHORT authority;
+	USHORT additional;
+};
+
+class DNSanswerHdr {
+public:
+	u_short qType;
+	u_short qClass;
+	u_int TTL;
+	u_short len;
+};
+#pragma pack(pop)
 
 #endif //PCH_H
