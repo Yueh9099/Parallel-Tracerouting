@@ -184,49 +184,161 @@ int main(int argc, char** argv)
 	}
 
 
-	// socket setup
-	SOCKET sendSocket;
-	sendSocket = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
-	if (sendSocket == INVALID_SOCKET) {
+	// ICMP socket setup
+	SOCKET sockICMP;
+	sockICMP = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+	if (sockICMP == INVALID_SOCKET) {
 		printf("socket() generate error %d", WSAGetLastError());
 		WSACleanup();
 		exit(-1);
 	}
 
-	//prepare sending buffer
-	u_char sendBuf[MAX_ICMP_SIZE];
-	ICMPHeader* icmp = (ICMPHeader*)sendBuf;
-	icmp->type = ICMP_ECHO_REQUEST;
-	icmp->code = 0;
-	icmp->id = (u_short)GetCurrentProcessId();
-	icmp->seq = 1;
-	icmp->checksum = 0;
-	icmp->checksum = ip_checksum((u_short*)sendBuf, ICMP_HDR_SIZE);
-	int bufLen = ICMP_HDR_SIZE;
-	// send the ICMP pkt
-	int ttl = 20;
-	if (setsockopt(sendSocket, IPPROTO_IP, IP_TTL, (const char*)&ttl, sizeof(ttl)) == SOCKET_ERROR) {
-		printf("setsocketopt failed with %d\n", WSAGetLastError());
-		closesocket(sendSocket);
-		exit(-1);
+
+	//making ICMP pkts
+	char icmpBufers[30][ICMP_HDR_SIZE];
+	for (int i = 0; i < 30; i++) {
+		ICMPHeader* icmp = (ICMPHeader*)icmpBufers[i];
+		icmp->type = ICMP_ECHO_REQUEST;
+		icmp->code = 0;
+		icmp->id = (u_short)GetCurrentProcessId();
+		icmp->seq = i + 1;
+		icmp->checksum = 0;
+		icmp->checksum = ip_checksum((u_short*)icmpBufers[i], ICMP_HDR_SIZE);
 	}
 
-	int sendResult;
-	sendResult = sendto(sendSocket, (const char*)sendBuf, bufLen, 0, (sockaddr*)&pingAddr, sizeof(pingAddr));
-	if (sendResult == SOCKET_ERROR) {
-		printf("send failed with error %d\n", WSAGetLastError());
+
+	// send the ICMP pkts
+	int ttl = 0;
+	for (int i = 0; i < 30; i++) {
+
+		ttl = i + 1;
+		ICMPHeader* icmp = (ICMPHeader*)icmpBufers[i];
+		printf("sending pkt with seq: %d ", icmp->seq);
+		if (setsockopt(sockICMP, IPPROTO_IP, IP_TTL, (const char*)&ttl, sizeof(ttl)) == SOCKET_ERROR) {
+			printf("setsocketopt failed with %d\n", WSAGetLastError());
+			closesocket(sockICMP);
+			exit(-1);
+		}
+		int sendSize;
+		if ((sendSize = sendto(sockICMP, (const char*)icmpBufers[i], ICMP_HDR_SIZE, 0, (sockaddr*)&pingAddr, sizeof(pingAddr))) == SOCKET_ERROR) {
+			printf("send failed with error %d\n", WSAGetLastError());
+			WSACleanup();
+			closesocket(sockICMP);
+			exit(-1);
+		}
+		printf("sent %d bytes\n", sendSize);
+	}
+
+	// DNS socket setup
+
+	SocketUDP dnsSocketWrap;
+	if (!dnsSocketWrap.bindUDP()) {
+		printf("DNS Socket local bind error %d\n", WSAGetLastError());
 		WSACleanup();
-		closesocket(sendSocket);
 		exit(-1);
 	}
+	dnsSocketWrap.setRemoteSocket(localDNSServer, 53);
+	SOCKET sockDNS = dnsSocketWrap.sock;
+	HANDLE recvICMP;
+	HANDLE recvDNS;
+	if (WSAEventSelect(sockICMP, recvICMP, FD_READ) == SOCKET_ERROR) {
+		printf("WSAEventSelect fail\n");
+		exit(-1);
+	}
+	if (WSAEventSelect(sockDNS, recvDNS, FD_READ) == SOCKET_ERROR) {
+		printf("WSAEventSelect fail\n");
+		exit(-1);
+	}
+	HANDLE hEvents[2];
+	hEvents[0] = recvICMP;
+	hEvents[1] = recvDNS;
 
+	bool recvEchoReply = false;
+	DWORD dwEvent;
+	while (true) {
+		dwEvent = WaitForMultipleObjects(2, hEvents, false, INFINITE);
+
+		switch (dwEvent)
+		{
+		case WAIT_OBJECT_0: 
+		{
+			//rececive the ICMP pkt
+			u_char recBuf[MAX_REPLY_SIZE];
+			int recvBytesICMP;
+			SOCKADDR remoteAddr;
+			int remoteLen = sizeof(SOCKADDR);
+			if ((recvBytesICMP = recvfrom(sockICMP, (char*)recBuf, MAX_REPLY_SIZE, 0, &remoteAddr, &remoteLen)) == SOCKET_ERROR) {
+				printf("recfrom() failed with %d\n", WSAGetLastError());
+				exit(-1);
+			}
+			else if (recvBytesICMP == 0) {
+				printf("recvfrom() error\n");
+				exit(-1);
+			}
+			//parse the icmp pkt
+
+			IPHeader* router_ip_hdr = (IPHeader*)recBuf;
+			int ipheaderLen = router_ip_hdr->h_len * 4;
+			ICMPHeader* router_icmp_hdr = (ICMPHeader*)(recBuf + ipheaderLen);
+			if (router_ip_hdr->proto == ICMP) {
+				if (router_icmp_hdr->type == ICMP_ECHO_REPLY && router_icmp_hdr->code == 0) {
+					if (router_icmp_hdr->id == GetCurrentProcessId()) {
+						if (recvEchoReply) {
+							break;
+						}
+						recvEchoReply = true;
+						printf("receive icmp with type 0 code 0 (echo reply)\n");
+						char srcIP[16];
+						struct sockaddr_in sa;
+						sa.sin_addr.S_un.S_addr = router_ip_hdr->source_ip;
+						inet_ntop(AF_INET, &(sa.sin_addr), srcIP, sizeof(srcIP));
+						printf("the host ip is: %s\n", srcIP);
+						// send the dns query pkt
+						QueryGenerator queryG(srcIP, localDNSServer);
+						queryG.generatePacket(1);
+						if (!dnsSocketWrap.sendUDP(queryG.packet, queryG.packetSize)) {
+							printf("Socket send error %d\n", WSAGetLastError());
+
+							WSACleanup();
+							exit(-1);
+						}
+
+					}
+				}
+
+				break;
+			}
+		}
+		case WAIT_OBJECT_0 + 1: 
+		{
+			//receive the DNS response
+			char buf[MAX_DNS_LEN];
+			if (!dnsSocketWrap.readUDP(buf, &timeout1)) {
+				WSACleanup();
+				printf("socket read fail\n");
+			}
+			ParserDNS parserDNS(buf, dnsSocket.resBytes, queryG.packet);
+			string routerName = parserDNS.getHostName();
+			printf("so the host name is %s\n", routerName.c_str());
+		}
+
+		default:
+			break;
+		}
+	}
+
+
+
+
+
+	/*
 	//receive and parse ICMP
 	u_char recBuf[MAX_REPLY_SIZE];
 
 
 	fd_set readfds;
 	FD_ZERO(&readfds);
-	FD_SET(sendSocket, &readfds);
+	FD_SET(sockICMP, &readfds);
 	timeval timeout;
 	timeout.tv_sec = 1000;
 	timeout.tv_usec = 0;
@@ -246,7 +358,7 @@ int main(int argc, char** argv)
 	else
 	{
 		//printf("I can receive ICMP now!\n");
-		if ((recvBytes = recvfrom(sendSocket, (char*)recBuf, MAX_REPLY_SIZE, 0, &remoteAddr, &remoteLen)) == SOCKET_ERROR) {
+		if ((recvBytes = recvfrom(sockICMP, (char*)recBuf, MAX_REPLY_SIZE, 0, &remoteAddr, &remoteLen)) == SOCKET_ERROR) {
 			printf("recfrom() failed with %d\n", WSAGetLastError());
 			exit(-1);
 		}
@@ -287,7 +399,7 @@ int main(int argc, char** argv)
 				inet_ntop(AF_INET, &(sa.sin_addr), srcIP, sizeof(srcIP));
 				printf("the host ip is: %s\n", srcIP);
 				// send the dns query pkt
-				
+
 				queryG.generatePacket(1);
 				if (!dnsSocket.sendUDP(queryG.packet, queryG.packetSize)) {
 					printf("Socket send error %d\n", WSAGetLastError());
@@ -311,7 +423,7 @@ int main(int argc, char** argv)
 	ParserDNS parserDNS(buf, dnsSocket.resBytes, queryG.packet);
 	string routerName = parserDNS.getHostName();
 	printf("so the host name is %s\n",routerName.c_str());
-
+	*/
 
 
 
