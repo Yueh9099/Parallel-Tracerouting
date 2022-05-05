@@ -32,7 +32,7 @@ QueryGenerator::QueryGenerator(const char* hostOrIP_in, const char* dnsServer_in
 
 
 void QueryGenerator::generatePacket(int ID_In) {
-	ID = htons(ID_In);
+	ID = ID_In;
 	DWORD IP_addr = inet_addr(hostOrIP);
 	//inverse query
 	if (IP_addr != INADDR_NONE)
