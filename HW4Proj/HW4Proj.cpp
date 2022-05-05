@@ -24,13 +24,15 @@
 #define MALLOC(x) HeapAlloc(GetProcessHeap(), 0, (x))
 #define FREE(x) HeapFree(GetProcessHeap(), 0, (x))
 
-class routerInfor {
+class RouterInfo {
 public:
-	int seq;
 	char* hostName;
 	DWORD ip;
-	double RTT;
-	bool recvIP;
+	double RTT = 0;
+	int transTimes = 1;// to make it simpler, first 30 pkts sending is counted here
+	bool recvIP = false;
+	bool recvHostName = false;;
+	bool isEchoRply = false;
 };
 
 /* remember the current packing state */
@@ -195,17 +197,20 @@ int main(int argc, char** argv)
 
 
 	//making ICMP pkts
+	DWORD processID = GetCurrentProcessId();
 	char icmpBufers[30][ICMP_HDR_SIZE];
 	for (int i = 0; i < 30; i++) {
 		ICMPHeader* icmp = (ICMPHeader*)icmpBufers[i];
 		icmp->type = ICMP_ECHO_REQUEST;
 		icmp->code = 0;
-		icmp->id = (u_short)GetCurrentProcessId();
+		icmp->id = (u_short)processID;
 		icmp->seq = i + 1;
 		icmp->checksum = 0;
 		icmp->checksum = ip_checksum((u_short*)icmpBufers[i], ICMP_HDR_SIZE);
 	}
 
+	// make a router information array
+	RouterInfo routerInfo[30];
 
 	// send the ICMP pkts
 	int ttl = 0;
@@ -239,8 +244,10 @@ int main(int argc, char** argv)
 	}
 	dnsSocketWrap.setRemoteSocket(localDNSServer, 53);
 	SOCKET sockDNS = dnsSocketWrap.sock;
-	HANDLE recvICMP;
-	HANDLE recvDNS;
+
+	//set receive events
+	HANDLE recvICMP = CreateEvent(NULL, FALSE, FALSE, NULL);
+	HANDLE recvDNS = CreateEvent(NULL, FALSE, FALSE, NULL);
 	if (WSAEventSelect(sockICMP, recvICMP, FD_READ) == SOCKET_ERROR) {
 		printf("WSAEventSelect fail\n");
 		exit(-1);
@@ -253,14 +260,21 @@ int main(int argc, char** argv)
 	hEvents[0] = recvICMP;
 	hEvents[1] = recvDNS;
 
+	//receive ICMP, parse,retransmission, DNS lookup
 	bool recvEchoReply = false;
+	bool complete = false;
 	DWORD dwEvent;
 	while (true) {
-		dwEvent = WaitForMultipleObjects(2, hEvents, false, INFINITE);
+
+		if (complete) {
+			break;
+		}
+
+		dwEvent = WaitForMultipleObjects(2, hEvents, false, 3000);
 
 		switch (dwEvent)
 		{
-		case WAIT_OBJECT_0: 
+		case WAIT_OBJECT_0:
 		{
 			//rececive the ICMP pkt
 			u_char recBuf[MAX_REPLY_SIZE];
@@ -275,14 +289,15 @@ int main(int argc, char** argv)
 				printf("recvfrom() error\n");
 				exit(-1);
 			}
-			//parse the icmp pkt
 
+			//parse the icmp pkt
 			IPHeader* router_ip_hdr = (IPHeader*)recBuf;
 			int ipheaderLen = router_ip_hdr->h_len * 4;
 			ICMPHeader* router_icmp_hdr = (ICMPHeader*)(recBuf + ipheaderLen);
 			if (router_ip_hdr->proto == ICMP) {
+				//icmp echo reply
 				if (router_icmp_hdr->type == ICMP_ECHO_REPLY && router_icmp_hdr->code == 0) {
-					if (router_icmp_hdr->id == GetCurrentProcessId()) {
+					if (router_icmp_hdr->id == processID) {
 						if (recvEchoReply) {
 							break;
 						}
@@ -305,24 +320,42 @@ int main(int argc, char** argv)
 
 					}
 				}
+				// icmp timeout
+				else if (router_icmp_hdr->type == ICMP_TTL_EXPIRED && router_icmp_hdr->code == 0) {
+
+					IPHeader* orig_ip_hdr = (IPHeader*)(router_icmp_hdr + 1);
+					ICMPHeader* orig_icmp_hdr = (ICMPHeader*)(orig_ip_hdr + 1);
+					if (orig_ip_hdr->proto == ICMP && orig_icmp_hdr->id == processID) {
+
+					}
+
+				}
 
 				break;
 			}
 		}
-		case WAIT_OBJECT_0 + 1: 
+		case WAIT_OBJECT_0 + 1:
 		{
 			//receive the DNS response
 			char buf[MAX_DNS_LEN];
-			if (!dnsSocketWrap.readUDP(buf, &timeout1)) {
+			if (!dnsSocketWrap.readUDPNonB(buf)) {
 				WSACleanup();
 				printf("socket read fail\n");
 			}
-			ParserDNS parserDNS(buf, dnsSocket.resBytes, queryG.packet);
+			ParserDNS parserDNS(buf, dnsSocketWrap.resBytes);
 			string routerName = parserDNS.getHostName();
+			int idDNS = parserDNS.id;
+			if (routerName.empty()) {
+				printf("DNS pkt error\n");
+			}
 			printf("so the host name is %s\n", routerName.c_str());
 		}
+		case WAIT_TIMEOUT:
+			complete = true;
+			break;
 
 		default:
+			printf("waitformultipleobject error\n");
 			break;
 		}
 	}
@@ -331,99 +364,7 @@ int main(int argc, char** argv)
 
 
 
-	/*
-	//receive and parse ICMP
-	u_char recBuf[MAX_REPLY_SIZE];
 
-
-	fd_set readfds;
-	FD_ZERO(&readfds);
-	FD_SET(sockICMP, &readfds);
-	timeval timeout;
-	timeout.tv_sec = 1000;
-	timeout.tv_usec = 0;
-	int ret;
-	int recvBytes;
-	SOCKADDR remoteAddr;
-	int remoteLen = sizeof(SOCKADDR);
-
-	if ((ret = select(0, &readfds, NULL, NULL, &timeout)) == SOCKET_ERROR) {
-		printf("select() failed with %d\n", WSAGetLastError());
-
-	}
-	else if (ret == 0) {
-		printf("Time out on select()\n");
-	}
-	// ready for receive
-	else
-	{
-		//printf("I can receive ICMP now!\n");
-		if ((recvBytes = recvfrom(sockICMP, (char*)recBuf, MAX_REPLY_SIZE, 0, &remoteAddr, &remoteLen)) == SOCKET_ERROR) {
-			printf("recfrom() failed with %d\n", WSAGetLastError());
-			exit(-1);
-		}
-		else if (recvBytes == 0) {
-			printf("recvfrom() error\n");
-			exit(-1);
-		}
-		// then receive successfully
-	}
-
-	//prepare the udp socket for dns
-	SocketUDP dnsSocket;
-	if (!dnsSocket.bindUDP()) {
-		printf("DNS Socket local bind error %d\n", WSAGetLastError());
-		WSACleanup();
-		return 0;
-	}
-	dnsSocket.setRemoteSocket(localDNSServer, 53);
-
-	//printf("ICMP type is %d:\n",router_icmp_hdr->type);
-
-	IPHeader* router_ip_hdr = (IPHeader*)recBuf;
-	int ipheaderLen = router_ip_hdr->h_len * 4;
-	ICMPHeader* router_icmp_hdr = (ICMPHeader*)(recBuf + ipheaderLen);
-
-	//IPHeader* origi_ip_hdr = (IPHeader*)(router_icmp_hdr + 1);
-	//ICMPHeader* origi_icmp_hdr = (ICMPHeader*)(origi_ip_hdr + 1);
-
-	char srcIP[16];
-	QueryGenerator queryG(srcIP, localDNSServer);
-	if (router_ip_hdr->proto == ICMP ) {
-		if (router_icmp_hdr->type == ICMP_ECHO_REPLY && router_icmp_hdr->code == 0) {
-			if (router_icmp_hdr->id == GetCurrentProcessId()) {
-				printf("receive icmp with type 0 code 0 (echo reply)\n");
-
-				struct sockaddr_in sa;
-				sa.sin_addr.S_un.S_addr = router_ip_hdr->source_ip;
-				inet_ntop(AF_INET, &(sa.sin_addr), srcIP, sizeof(srcIP));
-				printf("the host ip is: %s\n", srcIP);
-				// send the dns query pkt
-
-				queryG.generatePacket(1);
-				if (!dnsSocket.sendUDP(queryG.packet, queryG.packetSize)) {
-					printf("Socket send error %d\n", WSAGetLastError());
-
-					WSACleanup();
-					return 0;
-				}
-			}
-		}
-
-	}
-
-	timeval timeout1;
-	timeout1.tv_sec = 10;
-	timeout1.tv_usec = 0;
-	char buf[MAX_DNS_LEN];
-	if (!dnsSocket.readUDP(buf, &timeout1)) {
-		WSACleanup();
-		printf("socket read fail\n");
-	}
-	ParserDNS parserDNS(buf, dnsSocket.resBytes, queryG.packet);
-	string routerName = parserDNS.getHostName();
-	printf("so the host name is %s\n",routerName.c_str());
-	*/
 
 
 

@@ -13,6 +13,6 @@ public:
 	void setRemoteSocket(char* IP, int port);
 	bool sendUDP(char* packet, int packetSize);
 	bool readUDP(char* buf, timeval* timeout);
-
+	bool readUDPNonB(char* buf);
 	void close();
 };

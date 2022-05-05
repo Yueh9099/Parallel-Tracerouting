@@ -2,11 +2,11 @@
 #include "parserDNS.h"
 using namespace std;
 
-ParserDNS::ParserDNS(char* buf_in, int resBytes_in, char* sendPkt) {
+ParserDNS::ParserDNS(char* buf_in, int resBytes_in) {
     buf = buf_in;
     recvBytes = resBytes_in;
     dhRes = (FixedDNSHeader*)buf;
-    dh = (FixedDNSHeader*)sendPkt;
+    
 }
 
 bool ParserDNS::checkPkt() {
@@ -15,21 +15,7 @@ bool ParserDNS::checkPkt() {
         //printf("\t++ Invalid reply: packet smaller than fixed DNS Header\n");
         return false;
     }
-    /*
-    printf("\tTXID 0x%04x flags 0x%04x questions %d answers %d authority %d additional %d\n",
-        htons(dhRes->ID),
-        htons(dhRes->flags),
-        htons(dhRes->questions),
-        htons(dhRes->answers),
-        htons(dhRes->authority),
-        htons(dhRes->additional));
-    */
-
-    // Check for valid ID
-    if (dhRes->ID != dh->ID) {
-        //printf("\t++ invalid reply: TXID mismatch, sent 0x%04x, received 0x%04x\n", htons(dh->ID), htons(dhRes->ID));
-        return false;
-    }
+    id = dhRes->ID;
 
     // Check Rcode
     int Rcode = htons(dhRes->flags) & 0X000f;
@@ -87,6 +73,7 @@ string ParserDNS::getHostName() {
     if (!printQuestions()) {
         return "";
     }
+    // get the first answer of DNS_PTR
     if (htons(dhRes->answers) > 0) {
         //printf("\t------------ [answers] ------------\n");
         return getRR(htons(dhRes->answers));

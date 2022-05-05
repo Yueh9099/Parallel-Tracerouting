@@ -7,15 +7,14 @@ class ParserDNS {
 public:
 	char* buf;
 	int recvBytes;
+	int id;
 	char* resPacket;
 	FixedDNSHeader* dhRes;
-	FixedDNSHeader* dh;
-	ParserDNS(char* buf_in, int resSize_in, char* sendPkt);
+	ParserDNS(char* buf_in, int resSize_in);
 	bool checkPkt();
 	bool printQuestions();
 	bool printAnswers();
-	bool printAuthority();
-	bool printAdditional();
+	
 	bool printRR(int number);
 	string decodeStrDNS(char* curPkt);
 	string getHostName();

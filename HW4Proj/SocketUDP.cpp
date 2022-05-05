@@ -41,7 +41,24 @@ bool SocketUDP::sendUDP(char* packet, int packetSize) {
     return true;
 }
 
+bool SocketUDP::readUDPNonB(char* buf) {
+    struct sockaddr_in response;
+    int size = sizeof(response);
 
+
+    if ((resBytes = recvfrom(sock, buf, MAX_DNS_LEN, 0, (struct sockaddr*)&response, &size)) == SOCKET_ERROR) {
+        printf("Socket receive error %d\n", WSAGetLastError());
+        closesocket(sock);
+        return false;
+    }
+    //check if this packet came from the server to which we sent the query earlier 
+    if (response.sin_addr.s_addr != remote.sin_addr.s_addr || response.sin_port != remote.sin_port) {
+        printf("Invalid IP or port\n");
+        closesocket(sock);
+        return false;
+    }
+    return true;
+}
 
 bool SocketUDP::readUDP(char* buf, timeval* timeout) {
     fd_set fd;
