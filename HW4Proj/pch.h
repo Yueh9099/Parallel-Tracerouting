@@ -17,6 +17,7 @@
 #include <string.h>
 #include <time.h>
 #include <iphlpapi.h>
+#include <profileapi.h>
 
 
 // DNS Query types

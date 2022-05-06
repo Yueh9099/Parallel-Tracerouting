@@ -26,8 +26,8 @@
 
 class RouterInfo {
 public:
-	const char* hostName;
-	char* ip;
+	string hostName;
+	string ip;
 	double RTT = 0;
 	int transTimes = 1;// to make it simpler, first 30 pkts sending is counted here
 	bool recvIP = false;
@@ -147,14 +147,14 @@ int main(int argc, char** argv)
 		exit(-1);
 	}
 	char* host = argv[1];
-	printf("host is %s\n", host);
+	//printf("host is %s\n", host);
 
 	//get local dns server
 	char localDNSServer[16];
 	if (getDNSServer(localDNSServer, 16) == 0) {
 		printf("cannot get the local dns server IP\n");
 	}
-	printf("local dns:%s\n", localDNSServer);
+	//printf("local dns:%s\n", localDNSServer);
 
 	// WAS initialization
 	WSADATA wsaData;
@@ -184,7 +184,9 @@ int main(int argc, char** argv)
 	else {
 		pingAddr.sin_addr.S_un.S_addr = IP;
 	}
-
+	char hostIP[16];
+	inet_ntop(AF_INET, &(pingAddr.sin_addr), hostIP, 16);
+	printf("Tracerouting to %s...\n",hostIP);
 
 	// ICMP socket setup
 	SOCKET sockICMP;
@@ -207,30 +209,6 @@ int main(int argc, char** argv)
 		icmp->seq = i + 1;
 		icmp->checksum = 0;
 		icmp->checksum = ip_checksum((u_short*)icmpBufers[i], ICMP_HDR_SIZE);
-	}
-
-	
-
-	// send the ICMP pkts
-	int ttl = 0;
-	for (int i = 0; i < 30; i++) {
-
-		ttl = i + 1;
-		ICMPHeader* icmp = (ICMPHeader*)icmpBufers[i];
-		//printf("sending pkt with seq: %d ", icmp->seq);
-		if (setsockopt(sockICMP, IPPROTO_IP, IP_TTL, (const char*)&ttl, sizeof(ttl)) == SOCKET_ERROR) {
-			printf("setsocketopt failed with %d\n", WSAGetLastError());
-			closesocket(sockICMP);
-			exit(-1);
-		}
-		int sendSize;
-		if ((sendSize = sendto(sockICMP, (const char*)icmpBufers[i], ICMP_HDR_SIZE, 0, (sockaddr*)&pingAddr, sizeof(pingAddr))) == SOCKET_ERROR) {
-			printf("send failed with error %d\n", WSAGetLastError());
-			WSACleanup();
-			closesocket(sockICMP);
-			exit(-1);
-		}
-		//printf("sent %d bytes\n", sendSize);
 	}
 
 	// DNS socket setup
@@ -262,21 +240,89 @@ int main(int argc, char** argv)
 	// make a router information array
 	RouterInfo routerInfo[30];
 
-	//receive ICMP, parse,retransmission, DNS lookup
+	//set time counter variables
+	LARGE_INTEGER CurrentTime, ElapsedMicroseconds, TimeOutMilliseconds;
+	LARGE_INTEGER StartingTimes[30];
+	LARGE_INTEGER TimeExpires[31];
+	LARGE_INTEGER Frequency;
+	if (QueryPerformanceFrequency(&Frequency) == 0) {
+		printf("QueryPerformanceFrequency fail\n");
+	}
+	
+	//set paramters used in while loop for receiving ICMP pkts
 	bool complete = false;
 	DWORD dwEvent;
+	LARGE_INTEGER TimeExpireJ;
+	TimeExpireJ.QuadPart = INT64_MAX;
+	int j;
+
+	/*
+	LARGE_INTEGER testSendTime;
+	QueryPerformanceCounter(&testSendTime);
+	*/
+	// send the ICMP pkts
+	int ttl = 0;
+	for (int i = 0; i < 30; i++) {
+
+		ttl = i + 1;
+		ICMPHeader* icmp = (ICMPHeader*)icmpBufers[i];
+		//printf("sending pkt with seq: %d ", icmp->seq);
+		if (setsockopt(sockICMP, IPPROTO_IP, IP_TTL, (const char*)&ttl, sizeof(ttl)) == SOCKET_ERROR) {
+			printf("setsocketopt failed with %d\n", WSAGetLastError());
+			closesocket(sockICMP);
+			exit(-1);
+		}
+		int sendSize;
+		if ((sendSize = sendto(sockICMP, (const char*)icmpBufers[i], ICMP_HDR_SIZE, 0, (sockaddr*)&pingAddr, sizeof(pingAddr))) == SOCKET_ERROR) {
+			printf("send failed with error %d\n", WSAGetLastError());
+			WSACleanup();
+			closesocket(sockICMP);
+			exit(-1);
+		}
+		if (QueryPerformanceCounter(&StartingTimes[i]) == 0) {
+			printf("QueryPerformanceCounter fail\n");
+		}
+		TimeExpires[i].QuadPart = StartingTimes[i].QuadPart + 0.5 * Frequency.QuadPart;
+		//printf("sent %d bytes\n", sendSize);
+	}
+	TimeExpires[30].QuadPart = StartingTimes[0].QuadPart + 5 * Frequency.QuadPart;
+	
+	/*
+	QueryPerformanceCounter(&CurrentTime);
+	ElapsedMicroseconds.QuadPart = CurrentTime.QuadPart - TimeExpires[30].QuadPart;
+	ElapsedMicroseconds.QuadPart *= 1000000;
+	ElapsedMicroseconds.QuadPart /= Frequency.QuadPart;
+	printf("test the timeout is %fms\n", (double)(ElapsedMicroseconds.QuadPart) / 1000);
+	*/
+
+	//receive ICMP, parse,retransmission, DNS lookup
+	
 	while (true) {
 
 		if (complete) {
 			break;
 		}
 
-		dwEvent = WaitForMultipleObjects(2, hEvents, false, 5000);
+		for (int i = 0; i < 31; i++) {
+			if (TimeExpires[i].QuadPart < TimeExpireJ.QuadPart) {
+				TimeExpireJ.QuadPart = TimeExpires[i].QuadPart;
+				j = i;
+			}
+		}
+		QueryPerformanceCounter(&CurrentTime);
+		TimeOutMilliseconds.QuadPart = TimeExpireJ.QuadPart - CurrentTime.QuadPart;
+		TimeOutMilliseconds.QuadPart *= 1000;
+		TimeOutMilliseconds.QuadPart = TimeOutMilliseconds.QuadPart/ Frequency.QuadPart;
+		TimeExpireJ.QuadPart = INT64_MAX;
+
+		//printf("waiting the %dth pkt, and timeout is %dms\n",j, TimeOutMilliseconds.QuadPart);
+		dwEvent = WaitForMultipleObjects(2, hEvents, false, TimeOutMilliseconds.QuadPart);
 
 		switch (dwEvent)
 		{
 		case WAIT_OBJECT_0:
 		{
+			QueryPerformanceCounter(&CurrentTime);
 			//rececive the ICMP pkt
 			u_char recBuf[MAX_REPLY_SIZE];
 			int recvBytesICMP;
@@ -290,6 +336,7 @@ int main(int argc, char** argv)
 				printf("recvfrom() error\n");
 				exit(-1);
 			}
+			
 
 			//parse the icmp pkt
 			IPHeader* router_ip_hdr = (IPHeader*)recBuf;
@@ -300,7 +347,7 @@ int main(int argc, char** argv)
 				if (router_icmp_hdr->type == ICMP_ECHO_REPLY && router_icmp_hdr->code == 0) {
 					if (router_icmp_hdr->id == processID) {
 						
-						
+
 						char srcIP[16];
 						struct sockaddr_in sa;
 						sa.sin_addr.S_un.S_addr = router_ip_hdr->source_ip;
@@ -308,8 +355,15 @@ int main(int argc, char** argv)
 							printf("received IP is invalid\n");
 							break;
 						}
+						ElapsedMicroseconds.QuadPart = CurrentTime.QuadPart - StartingTimes[router_icmp_hdr->seq - 1].QuadPart;
+						ElapsedMicroseconds.QuadPart *= 1000000;
+						ElapsedMicroseconds.QuadPart /= Frequency.QuadPart;
 						routerInfo[router_icmp_hdr->seq - 1].recvIP = true;
+						routerInfo[router_icmp_hdr->seq - 1].isEchoRply = true;
 						routerInfo[router_icmp_hdr->seq - 1].ip = srcIP;
+						routerInfo[router_icmp_hdr->seq - 1].RTT = (double)(ElapsedMicroseconds.QuadPart) / 1000;
+
+						TimeExpires[router_icmp_hdr->seq - 1].QuadPart = INT64_MAX;//do not wait this pkt anymore
 						
 						//printf("the host ip is: %s\n", srcIP);
 						// send the dns query pkt
@@ -338,10 +392,17 @@ int main(int argc, char** argv)
 							printf("received IP is invalid\n");
 							break;
 						}
+						ElapsedMicroseconds.QuadPart = CurrentTime.QuadPart - StartingTimes[orig_icmp_hdr->seq - 1].QuadPart;
+						ElapsedMicroseconds.QuadPart *= 1000000;
+						ElapsedMicroseconds.QuadPart /= Frequency.QuadPart;
 						routerInfo[orig_icmp_hdr->seq - 1].recvIP = true;
 						routerInfo[orig_icmp_hdr->seq - 1].ip = srcIP;
+						routerInfo[orig_icmp_hdr->seq - 1].RTT = (double)(ElapsedMicroseconds.QuadPart) / 1000;
+						TimeExpires[orig_icmp_hdr->seq - 1].QuadPart = INT64_MAX;//do not wait the pkt anymore
 
-						printf("the router %d ip is: %s\n", orig_icmp_hdr->seq, srcIP);
+						//printf("RTT is %f\n", routerInfo[orig_icmp_hdr->seq - 1].RTT);
+
+						//printf("the router %d ip is: %s\n", orig_icmp_hdr->seq, srcIP);
 						// send the dns query pkt
 						QueryGenerator queryG(srcIP, localDNSServer);
 						queryG.generatePacket(orig_icmp_hdr->seq);
@@ -374,18 +435,51 @@ int main(int argc, char** argv)
 			
 
 			if (routerName.empty()) {
-				printf("DNS pkt error\n");
+				//printf("DNS pkt error\n");
 				break;
 			}
-			routerInfo[idDNS - 1].hostName = routerName.c_str();
+			routerInfo[idDNS - 1].hostName = routerName;
 			routerInfo[idDNS - 1].recvHostName = true;
 			
-			//printf("so the host name is %s\n", routerName.c_str());
+			//printf(" the router host name is %s\n", routerName.c_str());
 			break;
 		}
+		// timeout resend the ICMP pkt
 		case WAIT_TIMEOUT:
-			complete = true;
+		{
+			// DNS timeout
+			if (j == 30) {
+				complete = true;
+				break;
+			}
+			// else, jth ICMP timeout
+			if (routerInfo[j].transTimes < 3) {
+				ttl = j + 1;
+				ICMPHeader* icmp = (ICMPHeader*)icmpBufers[j];
+				//printf("sending pkt with seq: %d ", icmp->seq);
+				if (setsockopt(sockICMP, IPPROTO_IP, IP_TTL, (const char*)&ttl, sizeof(ttl)) == SOCKET_ERROR) {
+					printf("setsocketopt failed with %d\n", WSAGetLastError());
+					closesocket(sockICMP);
+					exit(-1);
+				}
+				int sendSize;
+				if ((sendSize = sendto(sockICMP, (const char*)icmpBufers[j], ICMP_HDR_SIZE, 0, (sockaddr*)&pingAddr, sizeof(pingAddr))) == SOCKET_ERROR) {
+					printf("send failed with error %d\n", WSAGetLastError());
+					WSACleanup();
+					closesocket(sockICMP);
+					exit(-1);
+				}
+				routerInfo[j].transTimes++;
+
+				QueryPerformanceCounter(&CurrentTime);
+				StartingTimes[j].QuadPart = CurrentTime.QuadPart;
+				TimeExpires[j].QuadPart = CurrentTime.QuadPart + 0.5 * Frequency.QuadPart;
+			}
+			else {
+				TimeExpires[j].QuadPart = INT64_MAX;
+			}
 			break;
+		}
 
 		default:
 			printf("waitformultipleobject error\n");
@@ -401,14 +495,19 @@ int main(int argc, char** argv)
 			continue;
 		}
 		if (routerInfoI.recvHostName) {
-			//printf("%s\t", routerInfoI.hostName);
-			printf("hostname doesnot work?\t");
+			printf("%s\t", routerInfoI.hostName.c_str());
+			//printf("hostname doesnot work?\t");
 		}
 		else {
 			printf("<no DNS entry>\t");
 		}
-		printf("(%s)\t",routerInfoI.ip);
+		printf("(%s)\t",routerInfoI.ip.c_str());
+		printf("%.3f ms\t", routerInfoI.RTT);
 		printf("(%d)\n",routerInfoI.transTimes);
+		//received IP
+		if (routerInfoI.isEchoRply) {
+			break;
+		}
 	}
 
 
