@@ -28,11 +28,16 @@ class RouterInfo {
 public:
 	string hostName;
 	string ip;
-	double RTT = 0;
+	long long int RTTmicroseconds = 0;
+	long long int RTOC = 0;
 	int transTimes = 1;// to make it simpler, first 30 pkts sending is counted here
+	int type = 0;
+	int code = 0;
 	bool recvIP = false;
 	bool recvHostName = false;;
 	bool isEchoRply = false;
+	bool isOtherError = false;
+
 };
 
 /* remember the current packing state */
@@ -142,12 +147,16 @@ int getDNSServer(char* dnsServerIP, int size) {
 
 int main(int argc, char** argv)
 {
+	
+
 	if (argc != 2) {
 		printf("Usage:hostname/IP");
 		exit(-1);
 	}
 	char* host = argv[1];
 	//printf("host is %s\n", host);
+	LARGE_INTEGER TraceroutingStart;
+	QueryPerformanceCounter(&TraceroutingStart);
 
 	//get local dns server
 	char localDNSServer[16];
@@ -197,6 +206,12 @@ int main(int argc, char** argv)
 		exit(-1);
 	}
 
+	LARGE_INTEGER Frequency;
+	if (QueryPerformanceFrequency(&Frequency) == 0) {
+		printf("QueryPerformanceFrequency fail\n");
+	}
+	// make a router information array
+	RouterInfo routerInfo[30];
 
 	//making ICMP pkts
 	DWORD processID = GetCurrentProcessId();
@@ -209,6 +224,7 @@ int main(int argc, char** argv)
 		icmp->seq = i + 1;
 		icmp->checksum = 0;
 		icmp->checksum = ip_checksum((u_short*)icmpBufers[i], ICMP_HDR_SIZE);
+		routerInfo[i].RTOC = 0.5 * Frequency.QuadPart;//set RTO for each router
 	}
 
 	// DNS socket setup
@@ -237,23 +253,19 @@ int main(int argc, char** argv)
 	hEvents[0] = recvICMP;
 	hEvents[1] = recvDNS;
 
-	// make a router information array
-	RouterInfo routerInfo[30];
+	
 
 	//set time counter variables
-	LARGE_INTEGER CurrentTime, ElapsedMicroseconds, TimeOutMilliseconds;
-	LARGE_INTEGER StartingTimes[30];
-	LARGE_INTEGER TimeExpires[31];
-	LARGE_INTEGER Frequency;
-	if (QueryPerformanceFrequency(&Frequency) == 0) {
-		printf("QueryPerformanceFrequency fail\n");
-	}
+	LARGE_INTEGER CurrentTimeC, ElapsedMicrosecondsC, TimeOutMilliseconds;
+	LARGE_INTEGER StartingTimesC[30];
+	LARGE_INTEGER TimeExpiresC[31];
+	
 	
 	//set paramters used in while loop for receiving ICMP pkts
 	bool complete = false;
 	DWORD dwEvent;
-	LARGE_INTEGER TimeExpireJ;
-	TimeExpireJ.QuadPart = INT64_MAX;
+	LARGE_INTEGER TimeExpireJC;
+	TimeExpireJC.QuadPart = INT64_MAX;
 	int j;
 
 	/*
@@ -279,13 +291,13 @@ int main(int argc, char** argv)
 			closesocket(sockICMP);
 			exit(-1);
 		}
-		if (QueryPerformanceCounter(&StartingTimes[i]) == 0) {
+		if (QueryPerformanceCounter(&StartingTimesC[i]) == 0) {
 			printf("QueryPerformanceCounter fail\n");
 		}
-		TimeExpires[i].QuadPart = StartingTimes[i].QuadPart + 0.5 * Frequency.QuadPart;
+		TimeExpiresC[i].QuadPart = StartingTimesC[i].QuadPart +routerInfo[i].RTOC;
 		//printf("sent %d bytes\n", sendSize);
 	}
-	TimeExpires[30].QuadPart = StartingTimes[0].QuadPart + 5 * Frequency.QuadPart;
+	TimeExpiresC[30].QuadPart = StartingTimesC[0].QuadPart + 5 * Frequency.QuadPart;
 	
 	/*
 	QueryPerformanceCounter(&CurrentTime);
@@ -299,30 +311,34 @@ int main(int argc, char** argv)
 	
 	while (true) {
 
-		if (complete) {
-			break;
-		}
+		
 
 		for (int i = 0; i < 31; i++) {
-			if (TimeExpires[i].QuadPart < TimeExpireJ.QuadPart) {
-				TimeExpireJ.QuadPart = TimeExpires[i].QuadPart;
+			if (TimeExpiresC[i].QuadPart < TimeExpireJC.QuadPart) {
+				TimeExpireJC.QuadPart = TimeExpiresC[i].QuadPart;
 				j = i;
 			}
 		}
-		QueryPerformanceCounter(&CurrentTime);
-		TimeOutMilliseconds.QuadPart = TimeExpireJ.QuadPart - CurrentTime.QuadPart;
+		if (TimeExpireJC.QuadPart == INT64_MAX) {
+			break;
+		}
+		QueryPerformanceCounter(&CurrentTimeC);
+		TimeOutMilliseconds.QuadPart = TimeExpireJC.QuadPart - CurrentTimeC.QuadPart;
 		TimeOutMilliseconds.QuadPart *= 1000;
 		TimeOutMilliseconds.QuadPart = TimeOutMilliseconds.QuadPart/ Frequency.QuadPart;
-		TimeExpireJ.QuadPart = INT64_MAX;
+		TimeExpireJC.QuadPart = INT64_MAX;
 
 		//printf("waiting the %dth pkt, and timeout is %dms\n",j, TimeOutMilliseconds.QuadPart);
+		if (TimeOutMilliseconds.QuadPart < 0) {
+			TimeOutMilliseconds.QuadPart = 0;
+		}
 		dwEvent = WaitForMultipleObjects(2, hEvents, false, TimeOutMilliseconds.QuadPart);
 
 		switch (dwEvent)
 		{
 		case WAIT_OBJECT_0:
 		{
-			QueryPerformanceCounter(&CurrentTime);
+			QueryPerformanceCounter(&CurrentTimeC);
 			//rececive the ICMP pkt
 			u_char recBuf[MAX_REPLY_SIZE];
 			int recvBytesICMP;
@@ -355,16 +371,32 @@ int main(int argc, char** argv)
 							printf("received IP is invalid\n");
 							break;
 						}
-						ElapsedMicroseconds.QuadPart = CurrentTime.QuadPart - StartingTimes[router_icmp_hdr->seq - 1].QuadPart;
-						ElapsedMicroseconds.QuadPart *= 1000000;
-						ElapsedMicroseconds.QuadPart /= Frequency.QuadPart;
+						ElapsedMicrosecondsC.QuadPart = CurrentTimeC.QuadPart - StartingTimesC[router_icmp_hdr->seq - 1].QuadPart;
+						ElapsedMicrosecondsC.QuadPart *= 1000000;
 						routerInfo[router_icmp_hdr->seq - 1].recvIP = true;
 						routerInfo[router_icmp_hdr->seq - 1].isEchoRply = true;
 						routerInfo[router_icmp_hdr->seq - 1].ip = srcIP;
-						routerInfo[router_icmp_hdr->seq - 1].RTT = (double)(ElapsedMicroseconds.QuadPart) / 1000;
+						routerInfo[router_icmp_hdr->seq - 1].RTTmicroseconds =ElapsedMicrosecondsC.QuadPart/ Frequency.QuadPart;
 
-						TimeExpires[router_icmp_hdr->seq - 1].QuadPart = INT64_MAX;//do not wait this pkt anymore
-						
+						for (int k = 0; k < router_icmp_hdr->seq - 1; k++) {
+							if (TimeExpiresC[k].QuadPart != INT64_MAX) {
+								if (k == router_icmp_hdr->seq - 2 && TimeExpiresC[k - 1].QuadPart == INT64_MAX) {
+									routerInfo[k].RTOC = (routerInfo[k - 1].RTTmicroseconds + routerInfo[k + 1].RTTmicroseconds) * Frequency.QuadPart / 1000000;
+									TimeExpiresC[k].QuadPart = StartingTimesC[k].QuadPart + routerInfo[k].RTOC;
+
+								}
+								else {
+									routerInfo[k].RTOC = 2 * (CurrentTimeC.QuadPart - StartingTimesC[router_icmp_hdr->seq - 1].QuadPart);
+									TimeExpiresC[k].QuadPart = StartingTimesC[k].QuadPart + routerInfo[k].RTOC;
+
+								}
+							}
+						}
+
+						for (int k = router_icmp_hdr->seq - 1; k < 30; k++) {
+							TimeExpiresC[k].QuadPart = INT64_MAX;//do not wait this pkt anymore
+
+						}
 						//printf("the host ip is: %s\n", srcIP);
 						// send the dns query pkt
 						QueryGenerator queryG(srcIP, localDNSServer);
@@ -392,13 +424,31 @@ int main(int argc, char** argv)
 							printf("received IP is invalid\n");
 							break;
 						}
-						ElapsedMicroseconds.QuadPart = CurrentTime.QuadPart - StartingTimes[orig_icmp_hdr->seq - 1].QuadPart;
-						ElapsedMicroseconds.QuadPart *= 1000000;
-						ElapsedMicroseconds.QuadPart /= Frequency.QuadPart;
+						ElapsedMicrosecondsC.QuadPart = CurrentTimeC.QuadPart - StartingTimesC[orig_icmp_hdr->seq - 1].QuadPart;
+						ElapsedMicrosecondsC.QuadPart *= 1000000;
 						routerInfo[orig_icmp_hdr->seq - 1].recvIP = true;
 						routerInfo[orig_icmp_hdr->seq - 1].ip = srcIP;
-						routerInfo[orig_icmp_hdr->seq - 1].RTT = (double)(ElapsedMicroseconds.QuadPart) / 1000;
-						TimeExpires[orig_icmp_hdr->seq - 1].QuadPart = INT64_MAX;//do not wait the pkt anymore
+						routerInfo[orig_icmp_hdr->seq - 1].RTTmicroseconds = (ElapsedMicrosecondsC.QuadPart) / Frequency.QuadPart;
+						TimeExpiresC[orig_icmp_hdr->seq - 1].QuadPart = INT64_MAX;//do not wait the pkt anymore
+
+						for (int k = 0; k < orig_icmp_hdr->seq - 1; k++) {
+							if (TimeExpiresC[k].QuadPart != INT64_MAX) {
+								if (k == orig_icmp_hdr->seq - 2 && TimeExpiresC[k - 1].QuadPart == INT64_MAX) {
+									routerInfo[k].RTOC = (routerInfo[k - 1].RTTmicroseconds + routerInfo[k + 1].RTTmicroseconds) * Frequency.QuadPart / 1000000;
+									TimeExpiresC[k].QuadPart = StartingTimesC[k].QuadPart + routerInfo[k].RTOC;
+
+								}
+								else {
+									routerInfo[k].RTOC = 2 * (CurrentTimeC.QuadPart - StartingTimesC[orig_icmp_hdr->seq - 1].QuadPart);
+									TimeExpiresC[k].QuadPart = StartingTimesC[k].QuadPart + routerInfo[k].RTOC;
+
+								}
+							}
+						}
+						//early termination
+						if (orig_icmp_hdr->seq== 30) {
+							TimeExpiresC[30].QuadPart = INT64_MAX;
+						}
 
 						//printf("RTT is %f\n", routerInfo[orig_icmp_hdr->seq - 1].RTT);
 
@@ -415,6 +465,19 @@ int main(int argc, char** argv)
 						//printf("receive icmp timeout, sent dns seq: %d\n", orig_icmp_hdr->seq);
 					}
 
+				}
+				//other error
+				else  {
+				IPHeader* orig_ip_hdr = (IPHeader*)(router_icmp_hdr + 1);
+				ICMPHeader* orig_icmp_hdr = (ICMPHeader*)(orig_ip_hdr + 1);
+				if (orig_icmp_hdr->id == processID) {
+					
+					routerInfo[orig_icmp_hdr->seq - 1].isOtherError = true;
+					routerInfo[orig_icmp_hdr->seq - 1].code = router_icmp_hdr->code;
+					routerInfo[orig_icmp_hdr->seq - 1].type = router_icmp_hdr->type;
+					TimeExpiresC[orig_icmp_hdr->seq - 1].QuadPart = INT64_MAX;//do not wait the pkt anymore
+				}
+					
 				}
 
 				break;
@@ -438,8 +501,14 @@ int main(int argc, char** argv)
 				//printf("DNS pkt error\n");
 				break;
 			}
+			
 			routerInfo[idDNS - 1].hostName = routerName;
 			routerInfo[idDNS - 1].recvHostName = true;
+			if (routerInfo[idDNS - 1].isEchoRply) {
+				ElapsedMicrosecondsC.QuadPart = 2 * routerInfo[idDNS - 1].RTTmicroseconds * Frequency.QuadPart;
+				TimeExpiresC[30].QuadPart = StartingTimesC[0].QuadPart + ElapsedMicrosecondsC.QuadPart / 1000000;
+			}
+			
 			
 			//printf(" the router host name is %s\n", routerName.c_str());
 			break;
@@ -449,9 +518,10 @@ int main(int argc, char** argv)
 		{
 			// DNS timeout
 			if (j == 30) {
-				complete = true;
+				TimeExpiresC[j].QuadPart = INT64_MAX;
 				break;
 			}
+			
 			// else, jth ICMP timeout
 			if (routerInfo[j].transTimes < 3) {
 				ttl = j + 1;
@@ -471,12 +541,16 @@ int main(int argc, char** argv)
 				}
 				routerInfo[j].transTimes++;
 
-				QueryPerformanceCounter(&CurrentTime);
-				StartingTimes[j].QuadPart = CurrentTime.QuadPart;
-				TimeExpires[j].QuadPart = CurrentTime.QuadPart + 0.5 * Frequency.QuadPart;
+				QueryPerformanceCounter(&CurrentTimeC);
+				StartingTimesC[j].QuadPart = CurrentTimeC.QuadPart;
+				//
+				TimeExpiresC[j].QuadPart = CurrentTimeC.QuadPart + routerInfo[j].RTOC;
 			}
 			else {
-				TimeExpires[j].QuadPart = INT64_MAX;
+				if (j == 29) {
+					TimeExpiresC[30].QuadPart = INT64_MAX;
+				}
+				TimeExpiresC[j].QuadPart = INT64_MAX;
 			}
 			break;
 		}
@@ -487,11 +561,19 @@ int main(int argc, char** argv)
 		}
 	}
 
+	QueryPerformanceCounter(&CurrentTimeC);
+	ElapsedMicrosecondsC.QuadPart = CurrentTimeC.QuadPart - TraceroutingStart.QuadPart;
+	ElapsedMicrosecondsC.QuadPart *= 1000;// acutually milliseconds
+	ElapsedMicrosecondsC.QuadPart /= Frequency.QuadPart;
 	for (int i = 0; i < 30; i++) {
 		RouterInfo routerInfoI = routerInfo[i];
 		printf("%d\t",i+1);
 		if (!routerInfoI.recvIP) {
-			printf("*\n");
+			printf("*");
+			if (routerInfoI.isOtherError) {
+				printf(" other error: code %d, type %d",routerInfoI.code,routerInfoI.type);
+			}
+			printf("\n");
 			continue;
 		}
 		if (routerInfoI.recvHostName) {
@@ -502,13 +584,15 @@ int main(int argc, char** argv)
 			printf("<no DNS entry>\t");
 		}
 		printf("(%s)\t",routerInfoI.ip.c_str());
-		printf("%.3f ms\t", routerInfoI.RTT);
+		printf("%.3f ms\t", (double)routerInfoI.RTTmicroseconds/1000);
 		printf("(%d)\n",routerInfoI.transTimes);
 		//received IP
 		if (routerInfoI.isEchoRply) {
 			break;
 		}
 	}
+
+	printf("Total execution time: %dms",ElapsedMicrosecondsC.QuadPart);
 
 
 

@@ -18,6 +18,8 @@
 #include <time.h>
 #include <iphlpapi.h>
 #include <profileapi.h>
+#include <iostream>
+#include <fstream>
 
 
 // DNS Query types
